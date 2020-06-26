@@ -1,0 +1,308 @@
+################################################################################
+###################### 0. Libraries/Packages Needed ############################
+################################################################################
+
+library("RColorBrewer") ## Color palettes
+library("ggplot2") ## Convenient and nice plotting
+library(shiny)
+require(rcytoscapejs)
+library(org.Hs.eg.db)
+library(data.table)
+library(GO.db)
+library(cyjShiny)
+library(DT)
+library(tm)
+library(htmlwidgets)
+library(R.utils)
+library(webshot)
+library(dplyr)
+library(limma)
+library(igraph)
+library(edgebundleR)
+
+################################################################################
+############################# 1. Import Data ###################################
+################################################################################
+
+data <- readRDS('C:/Users/User/Desktop/CANVS/Sample Data/processed_data.rds') # CHANGES BASED ON WHERE USER SAVED DATA
+
+Experimental <- data$Experimental
+Control <- data$Control
+
+################################################################################
+############################# 2. PermutationTest ###############################
+################################################################################
+
+#Function 3:Given a list of dataframes merge them into one dataframe
+MERGEDF <- function(list.of.df){
+    df <- data.frame()
+    for(i in 1:length(list.of.df)){
+        df<- rbind(df, list.of.df[[i]])
+    }
+    return(df)
+}
+
+#Function 8: Takes a list of dataframes and aggregates dataframes by accession number taking the mean of the SC
+AGGREGATE.BY.ACCESSION <- function(list.of.df, replicates){
+    df <- MERGEDF(list.of.df)
+    proteins <- as.data.frame(table(df$AC))
+    #get all the proteins that are shared between at least these many purifications 
+    proteins.select <- proteins[proteins$Freq >= replicates,]
+    #cut the dataframe by the selected proteins
+    df <- df[df$AC %in% proteins.select$Var1,]
+    df$SC <- as.numeric(df$SC)
+    #Make a reference dataframe 
+    ref.df <- data.frame(AC = df$AC,
+                         description = df$description)
+    ref.df <- unique(ref.df)
+    num.df <- data.frame(AC = df$AC,
+                         SC = df$SC)
+    #aggregate and return the mean
+    f.df <- aggregate(. ~ AC, data = num.df, FUN = mean)
+    f.df <- merge(f.df, ref.df, by = "AC")
+    return(f.df)
+}
+
+#Function 9: Compare a control and an experimental dataframe and get the common proteins between both dataframes
+#create a new dataframe annotated with which proteins come from the control and which come from the experimental 
+common.proteins.df <- function(control, experimental, control.bait, experimental.bait){
+    experimental$bait <- rep(experimental.bait, nrow(experimental))
+    experimental$purification <- rep('experimental', nrow(experimental))
+    control$bait <- rep(control.bait, nrow(control))
+    control$purification <- rep('control', nrow(control))
+    experimental.pro <- unique(as.character(experimental$AC))
+    control.pro <- unique(as.character(control$AC))
+    df <- rbind(experimental, control)
+    df.pro <- c(experimental.pro, control.pro)
+    proteins <- as.data.frame(table(df.pro))
+    proteins.common <- proteins[proteins$Freq == 2,]
+    df <- df[df$AC %in% proteins.common$df.pro,]
+    return(df)
+}
+
+#Function 10: Compare a control and experimental dataframe and get the unique proteins from the experimental dataframe
+#create a new dataframe annotated with which proteins come from control and which come from experimental 
+unique.proteins.df <- function(control, experimental, control.bait, experimental.bait){
+    experimental$bait <- rep(experimental.bait, nrow(experimental))
+    experimental$purification <- rep('experimental', nrow(experimental))
+    control$bait <- rep(control.bait, nrow(control))
+    control$purification <- rep('control', nrow(control))
+    experimental.pro <- unique(as.character(experimental$AC))
+    control.pro <- unique(as.character(control$AC))
+    df <- rbind(experimental, control)
+    df.pro <- c(experimental.pro, control.pro)
+    proteins <- as.data.frame(table(df.pro))
+    proteins.common <- proteins[proteins$Freq == 1,]
+    df <- df[df$AC %in% proteins.common$df.pro,]
+    df <- df[df$purification == 'experimental',]
+    return(df)
+}
+
+#Function 13: Takes in a dataframe with control and experimental annotations and does permutation analysis. Returns datarframe with significant hits
+df.permutation <- function(dataframe, pvalue, simulations = 10000){
+    #1. import the dataframe 
+    df1 <- dataframe 
+    df<- select_if(df1, is.numeric)
+    #2. run loop with permutation
+    numSims = simulations
+    index = 1:nrow(df) # list all rows
+    testStatDist = rep(NA,numSims)
+    for (i in 1 : numSims) {
+        bootData = df[,1:2]
+        # enforce null (swap pairs)
+        shouldFlipRows = runif( nrow(bootData) ) > .5
+        rowsToFlip = which (shouldFlipRows)
+        bootData[rowsToFlip,1:2] = bootData[rowsToFlip,2:1]
+        
+        # calculate statistic
+        testStatDist[i] = mean(bootData$Experimental - bootData$Control)
+    }
+    
+    
+    #calculate the p-value for everything
+    df$difference <- df$Experimental-df$Control
+    pvaldf = rep(NA, nrow(df))
+    for(i in 1:nrow(df)){
+        pvaldf[i]= (sum(testStatDist >= abs(df$difference[i]))+
+                        1+sum(testStatDist <= -abs(df$difference[i]))
+        )/(numSims+1)
+    }
+    df1$difference <- df$Experimental-df$Control
+    df1$pvalue <- pvaldf
+    
+    return(df1)
+}
+
+###1. Aggregate by baits 
+#seperate them out into seperate Baits 
+Experimental.baits <- names(Experimental)
+Control.baits <- names(Control)
+Experimental.baits <- sub(Experimental.baits, pattern = '_.*', replacement = '')
+Control.baits <- sub(Control.baits, pattern = '_.*', replacement = '')
+names(Experimental)<- Experimental.baits
+names(Control) <- Control.baits
+Experimental.baits <- unique(Experimental.baits)
+Control.baits <- unique(Control.baits)
+
+#make sublists based on baits 
+Experimental.list <- list()
+for (i in 1:length(Experimental.baits)){
+    Experimental.list[[Experimental.baits[[i]]]] <- Experimental[names(Experimental) == Experimental.baits[[i]]]
+}
+
+Control.list <- list()
+for (i in 1:length(Control.baits)){
+    Control.list[[Control.baits[[i]]]] <- Control[names(Control) == Control.baits[[i]]]
+}
+
+
+###2. Aaggregate by AC -> already aggregated by n.replicates or more 
+Experimental.AC.common <- lapply(Experimental.list, AGGREGATE.BY.ACCESSION, 2) #number dessignates how many replicates should be considered
+Control.AC.common <- lapply(Control.list,  AGGREGATE.BY.ACCESSION, 2) #number dessignates how many replicates should be considered
+
+
+
+
+###4. Get the shared proteins in the experimental list 
+Common.Proteins.list <- list()
+for(i in 1:length(Experimental.AC.common)){
+    Common.Proteins.list[[names(Experimental.AC.common[i])]] <- common.proteins.df(Control.AC.common[[1]], Experimental.AC.common[[i]], names(Control.AC.common[1]), names(Experimental.AC.common[i]))
+}
+
+
+###5. Add control DF and Make one dataframe: names(Gene, Control.SC, Experimental.SC)
+#create a loop that construct each dataframe 
+final.list <- list()
+list.names <- names(Common.Proteins.list)
+for(i in 1:length(Common.Proteins.list)){
+    df <- Common.Proteins.list[[i]]
+    #print(list.names[[i]])
+    #print(df)
+    #print(nrow(df))
+    df.f <- data.frame(AC = df$AC[df$purification == 'experimental'],
+                       Control = df$SC[df$purification == 'control'],
+                       Experimental = df$SC[df$purification == 'experimental'])
+    final.list[[list.names[[i]]]] <- df.f
+}
+
+
+###0. import the processed list of dataframes ready for permutation 
+common.list <- final.list
+list.names <- names(common.list)
+
+
+
+###1. Run permutation test 
+#create a bin to collect finished dataframes 
+summary.list <- list()
+#run a loop for each component of the initial dataframe list 
+for (i in 1:length(common.list)){
+    #check to see if you have to normalize the dataframe 
+    df <- common.list[[i]]
+    #run permutation test 
+    df.p <- df.permutation(df, 0.05)
+    #add it to the final list 
+    summary.list[[list.names[[i]]]] <- df.p
+}    
+    
+###2. Get the list of significant Genes 
+###3. Create a compatible output based on the genes
+###4. Add the unique hits
+###5. Merge dataframe and return as final dataframe with: names(AC, SC, Description, Bait)
+###2. Cut the dataframe by what the user deems as significant 
+#get all positive differences 
+
+for(i in 1:length(summary.list)){
+    summary.list[[i]] <- summary.list[[i]][summary.list[[i]]$difference > 0,]
+}
+#get all significant hists
+for(i in 1:length(summary.list)){
+    summary.list[[i]] <- summary.list[[i]][summary.list[[i]]$pvalue <= 0.05 ,]
+}
+
+
+###3. Compare to initial lists to format final dataframe
+sig.proteins <- list()
+for(i in 1:length(summary.list)){
+    sig.proteins[[i]]<- unique(summary.list[[i]]$AC)
+    #print(sig.proteins[[i]])
+}
+
+
+
+
+
+Experimental <- Experimental
+###3.1. Aggregate by Baits
+#seperate them out into seperate Baits 
+Experimental.baits <- names(Experimental)
+Experimental.baits <- sub(Experimental.baits, pattern = '_.*', replacement = '')
+names(Experimental)<- Experimental.baits
+Experimental.baits <- unique(Experimental.baits)
+
+
+#make sublists based on baits 
+Experimental.list <- list()
+for (i in 1:length(Experimental.baits)){
+    Experimental.list[[Experimental.baits[[i]]]] <- Experimental[names(Experimental) == Experimental.baits[[i]]]
+}
+
+
+###3.2. Aggregate by AC depending on how many purifications the user wants the hits to be in minimum -> take the mean SC
+Experimental.AC.common <- lapply(Experimental.list, AGGREGATE.BY.ACCESSION, 2)
+
+###3.3. Annotate Bait and cut by significant hits
+for(i in 1:length(Experimental.AC.common)){
+    Experimental.AC.common[[i]] <- Experimental.AC.common[[i]][Experimental.AC.common[[i]]$AC %in% sig.proteins[[i]],]
+    Experimental.AC.common[[i]]$bait <- rep(names(Experimental.AC.common[i]), nrow(Experimental.AC.common[[i]]))
+}
+
+Experimental.df <- MERGEDF(Experimental.AC.common)
+
+
+Experimental.df <- data.frame(AC = as.character(Experimental.df$AC),
+                              SC = Experimental.df$SC,
+                              description = Experimental.df$description,
+                              bait = as.character(Experimental.df$bait),
+                              purification = rep('permutation', nrow(Experimental.df)))
+
+
+# The unique proteins in each dataframe(proteins not present in the control)
+
+###1. Aggregate by Baits
+#seperate them out into seperate Baits 
+Experimental.baits <- names(Experimental)
+Control.baits <- names(Control)
+Experimental.baits <- sub(Experimental.baits, pattern = '_.*', replacement = '')
+Control.baits <- sub(Control.baits, pattern = '_.*', replacement = '')
+names(Experimental)<- Experimental.baits
+names(Control) <- Control.baits
+Experimental.baits <- unique(Experimental.baits)
+Control.baits <- unique(Control.baits)
+
+#make sublists based on baits 
+Experimental.list <- list()
+for (i in 1:length(Experimental.baits)){
+    Experimental.list[[Experimental.baits[[i]]]] <- Experimental[names(Experimental) == Experimental.baits[[i]]]
+}
+
+Control.list <- list()
+for (i in 1:length(Control.baits)){
+    Control.list[[Control.baits[[i]]]] <- Control[names(Control) == Control.baits[[i]]]
+}
+
+###2. Aggregate by AC depending on how many purifications the user wants the hits to be in minimum -> take the mean SC
+Experimental.AC.common <- lapply(Experimental.list, AGGREGATE.BY.ACCESSION, 2)
+Control.AC.common <- lapply(Control.list, AGGREGATE.BY.ACCESSION, 2)
+
+###3. Get the unique proteins in the experimental list 
+Unique.Proteins.list <- list()
+for(i in 1:length(Experimental.AC.common)){
+    Unique.Proteins.list[[names(Experimental.AC.common[i])]] <- unique.proteins.df(Control.AC.common[[1]], Experimental.AC.common[[i]], names(Control.AC.common[1]), names(Experimental.AC.common[i]))
+}
+
+Unique <- MERGEDF(Unique.Proteins.list)
+
+Experimental.df <- rbind(Experimental.df,Unique)
+
+saveRDS(Experimental.df, 'C:/Users/User/Desktop/CANVS/Sample Data/permutation_processed.rds')

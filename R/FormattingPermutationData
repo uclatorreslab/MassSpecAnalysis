@@ -1,0 +1,33 @@
+#Formatting Permutation Data
+
+o.df <- readRDS('C:/Users/User/Desktop/CANVS/Sample Data/permutation_processed.rds') # CHANGES BASED ON WHERE USER SAVED DATA
+df <- data.frame(AC = o.df$AC,
+                 SC = o.df$SC,
+                 Protein = as.character(UNIPROT2GENE(o.df$AC)),
+                 Bait = as.character(o.df$bait))
+n.prot <- c()
+for(i in 1:nrow(df)){
+    if(is.na(df$Protein[[i]]) == TRUE){
+        n.prot <- c(n.prot, as.character(o.df$AC[[i]]))
+    }else{
+        n.prot <- c(n.prot, as.character(df$Protein[[i]]))
+    }
+}
+
+df$Protein = n.prot
+
+wdf <- df
+wdf.f <- as.data.frame(table(wdf$AC))
+
+greaterthan = TRUE
+Common.Purifications = 1
+
+if (greaterthan == TRUE){
+    wdf.get <- wdf.f[wdf.f$Freq >= Common.Purifications,]
+    wdf <- wdf[wdf$AC %in% wdf.get$Var1,]
+}else{
+    wdf.get <- wdf.f[wdf.f$Freq == Common.Purifications,]
+    wdf <- wdf[wdf$AC %in% wdf.get$Var1,]
+}
+
+saveRDS(wdf, 'C:/Users/User/Desktop/CANVS/Sample Data/permvis.rds')
